@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Workshop01 - YOLO  Video Realtime</title>
+
+	<!--
+		STYLE หลักของหน้า:
+		- ใช้ flex layout ง่าย ๆ สำหรับจัดวาง step (1,2,3)
+		- มี video + canvas 2 ชั้น (overlay และ frame สำหรับ encode/ประมวลผล)
+	-->
+	<style>
+		/* กล่องแนวนอนสำหรับแถวหนึ่ง ๆ ของ UI */
+		.flex-row {
+			margin: 10px;
+			display: flex;
+			flex-direction: row;
+			align-items: flex-start;
+		}
+		/* กล่องแนวตั้ง (ใช้จัดกลุ่มพารามิเตอร์) */
+		.flex-col {
+			margin: 10px;
+			display: flex;
+			flex-direction: column;
+			align-items: flex-start;
+		}
+		/* กล่องย่อย ๆ ใส่กรอบ/เงาให้ดูแยกส่วนชัดเจน */
+		.flex-item {
+			margin: 3px;
+			padding: 10px;
+			border: 1px solid #ccc;
+			border-radius: 5px;
+			box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);
+		}
+		/* class อรรถประโยชน์: ซ่อน/แสดง */
+		.hide { display: none; }
+		.show { display: block; }
+
+		/* วาง <video> เป็นเลเยอร์ล่าง สัมพันธ์กับ container ที่มี position:relative */
+		#videoElement {
+			position: absolute;
+			top: 13;   /* NOTE: ควรระบุหน่วย เช่น 13px เพื่อความถูกต้องของ CSS */
+			left: 13;  /* NOTE: เช่นกัน: 13px */
+			z-index: 1;
+		}
+		/* canvas สำหรับ "เฟรมดิบ" ใช้ส่งขึ้นเซิร์ฟเวอร์ (ไม่ต้องให้ผู้ใช้เห็น) */
+		#canvasFrame {
+			visibility: hidden; /* ซ่อนแต่ยังคงวาด/อ่านพิกเซลได้ */
+		}
+		/* canvas ชั้นบนสุดสำหรับวาดผลลัพธ์ (bbox/segmentation/etc.) */
+		#canvasOverlay {
+			position: absolute;
+			top: 13;   /* NOTE: ควรเป็น 13px เพื่อให้ตรงกับ #videoElement */
+			left: 13;  /* NOTE: เช่นกัน: 13px */
+			z-index: 2; /* ให้อยู่เหนือวิดิโอ */
+		}
+	</style>
+
+	<!-- 
+		โหลดสคริปต์หลักของ workshop01 ในรูปแบบ ES Module
+		- เส้นทางไฟล์มาจาก static folder ของ Flask
+		- โค้ด JS จะผูก event (file input, connect/disconnect) และทำงาน encode -> ส่งขึ้นเซิร์ฟเวอร์
+	-->
+	<script src="{{ url_for('static', filename='workshop01.js') }}" type="module"></script>
+</head>
+
+<body>
+	<!-- ====================== STEP 1: เลือกวิดีโอจากเครื่อง ====================== -->
+	<div class="flex-row">
+		<div class="flex-item">1.</div>
+		<div class="flex-item">
+			<!-- 
+				accept="video/*" เพื่อจำกัดให้เลือกไฟล์วิดีโอ
+				NOTE: เบราว์เซอร์บางตัวอาจไม่บอก MIME ถูกต้องเสมอ แต่ใช้ JS ตรวจสอบได้ถ้าเจอ
+			-->
+			<input type="file" id="fileInput" accept="video/*" placeholder="เลือก video">
+		</div>
+	</div>
+
+	<!-- ====================== STEP 2: เชื่อมต่อเซิร์ฟเวอร์ + ตั้งค่าพารามิเตอร์ ====================== -->
+	<div class="flex-row">
+		<div class="flex-item">2.</div>
+
+		<!-- ปุ่ม Connect จะเปิด socket และเริ่มลูปส่งเฟรม (ใน JS) -->
+		<div class="flex-item">
+			<button id="connectButton">Connect</button>
+		</div>
+
+		<!-- กล่องพารามิเตอร์: conf / iou / task -->
+		<div class="flex-col flex-item">
+			<div class="flex-row">
+				<div class="flex-item">
+					<label for="confidence">Confidence:</label>
+					<!-- 
+						range 0.00–1.00, step 0.01 
+					-->
+					<input type="number" id="confidence" min="0.00" max="1.00" value="0.50" step="0.01">
+				</div>
+				<div class="flex-item">
+					<label for="iou">IOU:</label>
+					<input type="number" id="iou" min="0.00" max="1.00" value="0.45" step="0.01">
+				</div>
+			</div>
+
+			<div class="flex-row">
+				<div class="flex-item">
+					<!-- 
+						เลือกชนิดงานของ YOLO:
+						- detect   : กล่องล้อมวัตถุ
+						- segment  : ตัดพื้นหลัง/มาสก์วัตถุ
+						- classify : จัดหมวดภาพ
+						- pose     : keypoints โครงร่างคน
+						- obb      : กล่องหมุน (oriented bbox)
+					-->
+					<select id="tasksSelect">
+						<option value="detect">Task: Detect</option>
+						<option value="segment">Task: Segment</option>
+						<option value="classify">Task: Classify</option>
+						<option value="pose">Task: Pose</option>
+						<option value="obb">Task: OBB</option>
+					</select>
+				</div>
+			</div>
+		</div>
+
+		<!-- ปุ่ม Disconnect สำหรับหยุดส่งเฟรม/ปิด socket -->
+		<div class="flex-item">
+			<button id="disconnectButton">Disconnect</button>
+		</div>
+	</div>
+
+	<!-- ====================== STEP 3: แสดงผลวิดีโอ + วาดผลทับบน overlay ====================== -->
+	<!--
+		ทำ container เป็น position:relative เพื่อให้ child absolute (#videoElement, #canvasOverlay) อ้างอิงได้
+	-->
+	<div class="flex-row" style="position: relative;">
+		<div class="flex-item">3.</div>
+		<div class="flex-item">
+			<!-- 
+				<video>
+				- autoplay/playsinline: เล่นทันทีในหน้า (iOS จะไม่บังคับ fullscreen)
+				- controls/loop: ให้ผู้ใช้ควบคุม/วนซ้ำได้ (สะดวกตอนทดสอบ)
+				NOTE: video ขนาดและสัดส่วนควร sync กับขนาด canvas ใน JS ทุกครั้งที่โหลดไฟล์
+			-->
+			<video id="videoElement" autoplay playsinline controls loop></video>
+
+			<!-- overlay สำหรับวาดผลลัพธ์จากเซิร์ฟเวอร์ (bbox, mask, keypoints) -->
+			<canvas id="canvasOverlay"></canvas>
+
+			<!-- frame canvas ใช้เป็นแหล่งข้อมูลภาพที่จะ encode เป็น JPEG/PNG แล้วส่งขึ้นเซิร์ฟเวอร์ -->
+			<canvas id="canvasFrame"></canvas>
+		</div>
+	</div>
+</body>
+</html>
